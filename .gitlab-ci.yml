@@ -1,0 +1,41 @@
+---
+stages:
+- build
+- release
+- canary
+
+###################################################
+## uncomment this section to build your binary
+## if needed
+# build:
+#   stage: build
+#   image: # Add an image to build your service
+#   artifacts:
+#     paths:
+#       # pass my-app binary to the next stage
+#       # to include it in the Docker image
+#       - my-app
+#   script:
+#     - command to build my-app
+###################################################
+
+###################################################
+## do not remove or edit this block, it is
+## required for us to accept your submission!
+release:
+  stage: release
+  image: docker:stable
+  services:
+  - docker:dind
+  before_script:
+  - echo ${CI_JOB_TOKEN} | docker login -u gitlab-ci-token --password-stdin ${CI_REGISTRY}
+  script:
+  - docker build --pull -t ${CI_REGISTRY_IMAGE} .
+  - docker push ${CI_REGISTRY_IMAGE}
+
+canary:
+  stage: canary
+  image: registry.gitlab.com/autoiterativesolutions/src/monolith/ais-client:master
+  script: [ "/usr/bin/ais-client" ]
+##
+###################################################
