@@ -2,7 +2,7 @@ import datetime
 import re
 import socket
 
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 
 class NginxLogEntry:
@@ -21,11 +21,7 @@ class NginxLogEntry:
         self.user_agent_string = log_parsed[9]
     
     def __validate_http_path__(self, path: str) -> str:
-        if urlparse(f'https://test{path}').path == '' and len(path) != 0:
-            self.error = True
-            return ''
-        else:
-            return unquote(path)
+        return unquote(path)
 
     def __validate_http_verb__(self, verb: str) -> str:
         # Mapping to RFC. Adding 'PATCH' as it was a later add and not in the supplied RFC.
