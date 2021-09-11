@@ -1,73 +1,81 @@
 import datetime
-import re
-import socket
+import ipaddress
 
 from urllib.parse import unquote
 
 
-class NginxLogEntry:
-
-    def __init__(self, log_parsed: re.Match) -> None:
-        self.error = None
-        self.log_entry = log_parsed[0]
-        self.remote_addr = self.__validate_ip__(log_parsed[1])
-        self.remote_user = log_parsed[2]
-        self.date = self.__validate_timestamp__(log_parsed[3])
-        self.http_verb = self.__validate_http_verb__(log_parsed[4])
-        self.http_path = self.__validate_http_path__(log_parsed[5])
-        self.http_version = log_parsed[6]
-        self.http_response_code = self.__validate_response_code__(log_parsed[7])
-        self.http_response_time_milliseconds = self.__validate_response_time__(log_parsed[8])
-        self.user_agent_string = log_parsed[9]
+def validate_entry(entry: dict) -> dict:
+    ''' Validation function for key fields in an Nginx Log Entry
     
-    def __validate_http_path__(self, path: str) -> str:
-        return unquote(path)
+        Parameters
+        ----------
+        entry: NginxLogEntry
+            dictionary containing the raw field entries
+        
+        Return
+        ------
+        NginxLogEntry
+            dictionary containing the validated and standardized field entries
+            If 'False' is returned, that means the dictionary had an invalid entry
+    '''
 
-    def __validate_http_verb__(self, verb: str) -> str:
-        # Mapping to RFC. Adding 'PATCH' as it was a later add and not in the supplied RFC.
-        # Ref: https://datatracker.ietf.org/doc/html/rfc5789#section-2
-        if verb in ['CONNECT', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT', 'TRACE']:
-            return verb
-        else:
-            self.error = True
-            return ''
-
-    def __validate_ip__(self, ip_address: str) -> str:
-        try:
-            socket.inet_aton(ip_address)
-        except socket.error:
-            self.error = True
-            return ''
-        else:
-            return ip_address
+    # Validating remote_addr
+    entry['remote_addr'] = validate_ip_address(entry['remote_addr'])
+    if not entry['remote_addr']:
+        return False
     
-    def __validate_response_code__(self, code: str) -> str:
-        # Mapping to RFC
-        try:
-            if int(code) not in range(100, 600):
-                raise ValueError 
-        except ValueError:
-            self.error = True
-            return ''
-        else:
-            return code
-    
-    def __validate_response_time__(self, response_time: str) -> int:
-        try:
-            if int(response_time) < 0:
-                raise ValueError
-        except ValueError:
-            self.error = True
-            return ''
-        else:
-            return int(response_time)
+    # Validating date against common log format regex
+    try:
+        datetime.datetime.strptime(entry['date'], '%d/%b/%Y:%H:%M:%S %z')
+    except ValueError:
+        return False
 
-    def __validate_timestamp__(self, timestamp: str) -> str:
-        # Regex for common log format datetime
-        try:
-            datetime.datetime.strptime(timestamp, '%d/%b/%Y:%H:%M:%S %z')
-        except ValueError:
-            self.error = True
-            return ''
-        else:
-            return timestamp
+    # Mapping http_verb to RFC. Adding 'PATCH' as it was a later add and not in the supplied RFC.
+    # Ref: https://datatracker.ietf.org/doc/html/rfc5789#section-2
+    if not entry['http_verb'] in ['CONNECT', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT', 'TRACE']:
+        return False
+
+    # Standardizing http_path output to support URL encoding
+    entry['http_path'] = unquote(entry['http_path']).split('?')[0]
+
+    # Validating http_response_code is an integer between 100 and 599
+    try:
+        if int(entry['http_response_code']) not in range(100, 600) or len(entry['http_response_code']) != 3:
+            raise ValueError 
+    except ValueError:
+        return False
+    
+    # Casting http_response_time_milliseconds to int to support math operations later
+    try:
+        entry['http_response_time_milliseconds'] = int(entry['http_response_time_milliseconds'])
+        if entry['http_response_time_milliseconds'] < 0:
+            raise ValueError
+    except ValueError:
+        return False
+
+    return entry
+        
+
+def validate_ip_address(address: str) -> str:
+    ''' Basic IP validation and standardization function
+    
+        Parameters
+        ----------
+        address: str
+            an IPv4 or an IPv6 address in human readable form. This address can be short hand
+            or long hand.
+
+        Return
+        ------
+        IPAddress
+            an IPv4 or an IPv6 address in human readable form in short hand (if possible)
+            If 'False' is returned then the input was not a valid IPv4 or IPv6 address
+    '''
+
+    try:
+        ip_int = int(ipaddress.ip_address(address))
+    except:
+        return False
+    else:
+        return str(ipaddress.ip_address(ip_int))
+

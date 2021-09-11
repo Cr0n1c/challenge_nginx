@@ -4,15 +4,35 @@ import os
 import re
 import sys
 
+import lib 
+
 from pathlib import Path
 from typing import NewType
 
-from lib import NginxLogEntry
+from lib.statsd_client import start_client
+
 
 ParserResults = NewType('ParserResults', dict)
 
 
 def out_to_json_file(data: dict, output_file: str) -> bool:
+    ''' Takes the expected results datastructure and outputs to a file per README.md
+
+        Parameters
+        ----------
+        data: dict
+            This is the finalized data already in the data structure requested
+        
+        output_file: str
+            This is the file path for where we will write the file.
+
+        Return
+        ------
+        bool
+            If this returns 'True' then we successfully created the file and wrote data
+            If this returns 'False' then we were unsuccessful
+    '''
+
     try:
         with open(output_file, 'w') as f:
             print(json.dumps(data, indent=2), file=f)
@@ -24,6 +44,28 @@ def out_to_json_file(data: dict, output_file: str) -> bool:
 
 
 def parse_nginx_log(arguments: argparse.Namespace) -> ParserResults:
+    ''' The main function data validation, transformation, and execution
+    
+        Parameters
+        ----------
+        arguments: argparse.Namespace
+            Dictionary that handles all the configuration parameters.
+        
+        Return
+        ------
+        ParserResults
+            Dictionary containing the final output
+
+            Example:
+            {
+                'total_number_of_lines_processed': 0,
+                'total_number_of_lines_ok': 0,
+                'total_number_of_lines_failed': 0,
+                'top_client_ips': {},
+                'top_path_avg_seconds': {}
+            }
+    '''
+
     nginx_ips = {}
     url_load_times = {}
 
@@ -37,42 +79,43 @@ def parse_nginx_log(arguments: argparse.Namespace) -> ParserResults:
 
     # Basic regex to ensure that we have the correct amount of fields with extremely basic pattern matching
     # We will do the more advanced checks later. This is to clear the low hanging fruit.
-    pattern = '^(\d+\.\d+\.\d+\.\d+) - (.*?) \[(.*?)\] "(.*?) (.*?) (HTTP/\d\.\d)" ([1-5]\d{2}) (\d+) "(.*)"$'
-    compiled_pattern = re.compile(pattern)
-
     for entry in open(arguments.input_file):
-        # Start of processing for each new log entry
         results['total_number_of_lines_processed'] += 1
-        parsed_entry = compiled_pattern.match(entry)
-
-        # Error handling to ensure the entry passed basic regex checks
-        if not bool(parsed_entry):
-            results['total_number_of_lines_failed'] += 1
-            continue
         
-        # More sufficsticated validation for the log entry
-        log_object = NginxLogEntry(parsed_entry)
-        if log_object.error == True:
+        # Creating basic regex 
+        parse_entry = re.match(r'(?P<remote_addr>.*) - (?P<remote_user>.*) \[(?P<date>.*)\] "(?P<http_verb>\w+) ' + \
+                               r'(?P<http_path>.*) (?P<http_version>HTTP/\d+\.\d+)" (?P<http_response_code>\d+) ' + \
+                               r'(?P<http_response_time_milliseconds>\d+) "(?P<user_agent_string>.*)"', 
+                               entry
+        )
+
+        # Basic Regex filtering of bad entries
+        try:
+            log_object_regex = parse_entry.groupdict()
+            log_object = lib.validate_entry(log_object_regex)
+            if not log_object:
+                raise AttributeError
+        except AttributeError:
             results['total_number_of_lines_failed'] += 1
             continue
+        else:
+            results['total_number_of_lines_ok'] += 1
         
         # All our checks our completed and we have an 'ok' line
-        results['total_number_of_lines_ok'] += 1
-
         # Counting the customer ip addresses
-        if nginx_ips.get(log_object.remote_addr):
-            nginx_ips[log_object.remote_addr] += 1
+        if nginx_ips.get(log_object['remote_addr']):
+            nginx_ips[log_object['remote_addr']] += 1
         else:
-            nginx_ips[log_object.remote_addr] = 1
+            nginx_ips[log_object['remote_addr']] = 1
 
         # Determining average load times for pages
-        if url_load_times.get(log_object.http_path):
-            url_load_times[log_object.http_path]['count'] += 1
-            url_load_times[log_object.http_path]['total_ms_load_time'] += log_object.http_response_time_milliseconds
+        if url_load_times.get(log_object.get('http_path')):
+            url_load_times[log_object['http_path']]['count'] += 1
+            url_load_times[log_object['http_path']]['total_ms_load_time'] += log_object['http_response_time_milliseconds']
         else:
-            url_load_times[log_object.http_path] = {
+            url_load_times[log_object['http_path']] = {
                 'count': 1,
-                'total_ms_load_time': log_object.http_response_time_milliseconds
+                'total_ms_load_time': log_object['http_response_time_milliseconds']
             }
                 
     # Iterating through remote_addr of 'ok' lines to get our top client ips
@@ -88,6 +131,10 @@ def parse_nginx_log(arguments: argparse.Namespace) -> ParserResults:
     results['top_path_avg_seconds'] = {k: v for k, v in sorted(average_load_times.items(), 
         key=lambda x: x[1], reverse=True)[0:arguments.top_path_avg_seconds]}
     average_load_times = None # Freeing up memory
+
+    client = start_client()
+    client.incr('1', int(results['total_number_of_lines_ok']))
+    client.incr('2', int(results['total_number_of_lines_failed']))
 
     return results
 
@@ -116,7 +163,7 @@ if __name__ == '__main__':
         default=10,
         dest='top_client_ips',
         help='Defines the maximum number of results to output in the top_client_ips field. ' + 
-             'Defaults to 10 if not provided. Choices are integers between 0 and 100.',
+             'Defaults to 10 if not provided.',
         metavar='[Choices are integers between 0 and 10000]',
         type=int
     )
@@ -153,7 +200,7 @@ if __name__ == '__main__':
         print(e.args[-1])
         sys.exit(1)
     
-    # Running parser logic
+    # Running program
     if not out_to_json_file(parse_nginx_log(arguments), arguments.output_file):
         sys.exit(2)
 
